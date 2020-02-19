@@ -15,5 +15,5 @@ set(SOURCES
 
 os_add_executable(smp_bench "SMP test" ${SOURCES})
 os_add_stdout(smp_bench default_stdout)
-os_add_drivers(smp_bench boot_logger)
-#os_add_plugins(smp_bench vfs)
+os_add_drivers(smp_bench e1000)
+#os_add_drivers(smp_bench boot_logger)

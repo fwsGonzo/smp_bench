@@ -1,5 +1,6 @@
 {
-  "smp" : 4,
-  "mem" : 200,
-  "cpu" : {"model": "host"}
+  "smp" : 6,
+  "mem" : 500,
+  "cpu" : {"model": "host"},
+  "net" : [{"device" : "e1000e"}]
 }
