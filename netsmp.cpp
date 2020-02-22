@@ -3,7 +3,30 @@
 #include <statman>
 #include <net/inet>
 #include <net/interfaces>
+
 static const uint16_t PORT = 1234;
+
+struct SMP_Queue
+{
+	bool enqueue(net::Packet_ptr packet)
+	{
+		this->spinner.lock();
+		bool qfirst = this->queue.empty();
+		this->queue.push_back(std::move(packet));
+		this->spinner.unlock();
+		return qfirst;
+	}
+	std::vector<net::Packet_ptr> grab_queue()
+	{
+		this->spinner.lock();
+		auto vec = std::move(this->queue);
+		this->spinner.unlock();
+		return vec;
+	}
+	
+	std::vector<net::Packet_ptr> queue;
+	smp_spinlock spinner;
+};
 
 struct TCP_MP
 {
@@ -17,24 +40,36 @@ struct TCP_MP
 
 	void tcp_incoming(net::Packet_ptr packet)
 	{
-		bool first = SMP::add_task(
-			SMP::task_func::make_packed(
-			[this, p = std::move(packet)] () mutable -> void {
-				this->m_inet.tcp().receive4(std::move(p));
-			}), this->m_cpu);
-		if (first) SMP::signal(this->m_cpu);
+		bool qfirst = incoming.enqueue(std::move(packet));
+		if (qfirst)
+		{
+			bool first = SMP::add_task(
+			[this] () -> void
+			{
+				for (auto& packet : incoming.grab_queue()) {
+					this->m_inet.tcp().receive4(std::move(packet));
+				}
+			}, this->m_cpu);
+			if (first) SMP::signal(this->m_cpu);
+		}
 	}
 	void tcp_outgoing(net::Packet_ptr packet)
 	{
-		bool first = SMP::add_bsp_task(
-			SMP::task_func::make_packed(
-			[this, p = std::move(packet)] () mutable -> void {
-				this->m_inet.ip_obj().transmit(std::move(p));
-			}));
-		if (first) SMP::signal_bsp();
+		bool qfirst = outgoing.enqueue(std::move(packet));
+		if (qfirst)
+		{
+			bool first = SMP::add_bsp_task(
+			[this] () -> void {
+				for (auto& packet : outgoing.grab_queue()) {
+					this->m_inet.ip_obj().transmit(std::move(packet));
+				}
+			});
+			if (first) SMP::signal_bsp();
+		}
 	}
 	void tcp_process_writeq(size_t packets)
 	{
+		// How to accelerate this?
 		bool first = SMP::add_task(
 			[this, packets] () {
 				this->m_inet.tcp().process_writeq(packets);
@@ -45,6 +80,9 @@ struct TCP_MP
 private:
 	signed int m_cpu;
 	net::Inet& m_inet;
+	
+	SMP_Queue incoming;
+	SMP_Queue outgoing;
 };
 
 void Service::start()
@@ -57,6 +95,7 @@ void Service::start()
 	[] (auto conn)
 	{
 		size_t* bytes = new size_t(0);
+		uint64_t* start = new uint64_t(RTC::nanos_now());
 		printf("[CPU %d] * Receiving data on port %u\n", 
 				SMP::cpu_id(), PORT);
 
@@ -67,23 +106,15 @@ void Service::start()
 			*bytes += buf->size();			
 		})
 		.on_close(
-		[bytes] () {
+		[bytes, start] () {
 			printf("[CPU %d] * Bytes received: %zu b\n", SMP::cpu_id(), *bytes);
+			double secs = (RTC::nanos_now() - *start) / 1e9;
+			double mbs  = *bytes / (1024 * 1024.0) / secs;
+			printf("[CPU %d] * Time: %.2fs, %.2f MB/sec, %.2f Mbit/sec\n",
+					SMP::cpu_id(), secs, mbs, mbs * 8.0);
 			delete bytes;
 		});
 	});
-
-	using namespace std::chrono;
-	Timers::periodic(1s, 
-		[] (int) {
-			auto& sm = Statman::get();
-			uint32_t sendq_now = sm.get_by_name("eth0.sendq_now").get_uint32();
-			uint32_t sendq_max = sm.get_by_name("eth0.sendq_max").get_uint32();
-			
-			printf("%s:  SendQ now=%u max=%u\n", 
-					inet.ifname().c_str(),
-					sendq_now, sendq_max);
-		});
 
 	printf("Listening on %s:%u\n", inet.ip_addr().to_string().c_str(), PORT);
 }

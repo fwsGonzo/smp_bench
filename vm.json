@@ -1,6 +1,6 @@
 {
-  "smp" : 6,
-  "mem" : 500,
+  "smp" : 2,
+  "mem" : 100,
   "cpu" : {"model": "host"},
   "net" : [{"device" : "vmxnet3"}]
 }
